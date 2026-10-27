@@ -1,0 +1,11 @@
+
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+*.db-wal
+*.db-shm

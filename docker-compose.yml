@@ -1,0 +1,26 @@
+services:
+  material-pass:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: material-pass-module:1.1.0
+    container_name: material-pass-module
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      DB_PATH: /app/data/material.db
+      # CHANGE THIS to a long random secret before use.
+      SESSION_SECRET: "CHANGE-ME-TO-A-LONG-RANDOM-SECRET-BEFORE-DEPLOYMENT"
+      # Optional public URL used in generated QR links. Leave blank to use request host.
+      APP_BASE_URL: ""
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/auth/me').then(r=>process.exit(r.status < 500 ? 0 : 1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
