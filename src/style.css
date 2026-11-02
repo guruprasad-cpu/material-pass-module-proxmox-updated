@@ -13,3 +13,13 @@
 /* Quantity status colours requested by the client */
 .qty-pass{font-weight:700!important}.qty-arrived{color:#a87900!important;font-weight:800!important;background:#fff8d9}.qty-returned{color:#218838!important;font-weight:800!important;background:#eaf8ed}
 .list-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;width:min(1440px,94%);margin:18px auto 10px;color:#60758a;font-size:13px}.list-toolbar button{border:1px solid #cbd6e1;background:#fff;border-radius:7px;padding:9px 13px;cursor:pointer}.pass-list-scroll{width:min(1440px,94%);margin:0 auto 35px}.pass-list-table{min-width:1050px}.pass-list-table .actions{display:flex;gap:5px;flex-wrap:wrap}.pass-list-table .actions button,.pass-list-table .actions a{padding:6px 8px;font-size:11px}.history-block{margin-top:20px}.history-block h3{color:#12314d}.arrival-details{margin:12px 0;padding:14px;background:#f7f9fc;border-radius:8px}.oprow small{display:block}.oprow input{width:120px;max-width:35%;padding:10px;border:1px solid #cbd5e1;border-radius:7px}.details table{min-width:850px}.pass-list-table .badge{white-space:normal}@media(max-width:650px){.list-toolbar{align-items:flex-start;flex-direction:column}.pass-list-scroll{width:100%}}
+
+/* Indian Navy Project Seabird client branding */
+.brand-block{display:flex;align-items:center;gap:14px;min-width:0}
+.brand-logo{width:64px;height:64px;object-fit:contain;flex:0 0 auto}
+.login-logo{display:block;width:min(100%,300px);height:auto;max-height:260px;object-fit:contain;margin:0 auto 16px}
+.login-card{max-width:480px}
+@media(max-width:700px){.brand-logo{width:44px;height:44px}.brand-block{gap:9px}.login-logo{max-height:200px}}
+
+/* Ensure the dark Seabird artwork remains visible on the navy header. */
+.brand-logo{background:#fff;border-radius:50%;padding:5px;box-shadow:0 0 0 2px rgba(255,255,255,.75);}

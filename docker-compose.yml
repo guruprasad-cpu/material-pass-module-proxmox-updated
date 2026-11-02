@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: material-pass-module:1.1.0
+    image: material-pass-module:2026-11-02
     container_name: material-pass-module
     restart: unless-stopped
     ports:
@@ -12,10 +12,8 @@ services:
       NODE_ENV: production
       PORT: "3000"
       DB_PATH: /app/data/material.db
-      # CHANGE THIS to a long random secret before use.
-      SESSION_SECRET: "CHANGE-ME-TO-A-LONG-RANDOM-SECRET-BEFORE-DEPLOYMENT"
-      # Optional public URL used in generated QR links. Leave blank to use request host.
-      APP_BASE_URL: ""
+      SESSION_SECRET: "${SESSION_SECRET:?Set SESSION_SECRET in .env before starting}"
+      APP_BASE_URL: "${APP_BASE_URL:-}"
     volumes:
       - ./data:/app/data
     healthcheck:

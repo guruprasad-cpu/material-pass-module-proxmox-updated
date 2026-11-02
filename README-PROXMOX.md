@@ -13,3 +13,4 @@ Quick start:
 See `PROXMOX-DEPLOYMENT.md` for complete instructions and backup guidance. SQLite data persists under `./data`.
 
 Note: This ZIP contains the Docker build context, not a prebuilt Docker image tar. Build the image on the Linux Docker host.
+\n\nFor the 02-Nov-2026 build, follow `PROXMOX-DOCKER-BUILD-GUIDE.md`.\n

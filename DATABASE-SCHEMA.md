@@ -8,24 +8,17 @@ Database file: `data/material.db` (Docker path: `/app/data/material.db`). The ap
 |---|---|---|
 | `users` | Login accounts and roles | `id`, `username`, `password_hash`, `role`, `company_name`, `contract_name`, `approver_name`, `created_at` |
 | `passes` | One record per material pass | `id`, `pass_no`, company/contract, direction, type, return date, transport details, status, creation/approval/arrival/completion timestamps, rejection details |
-| `items` | Material or asset lines on a pass; stores current totals | `id`, `pass_id`, description, unit, `total_qty`, `arrived_qty`, `returned_qty`, status, IT asset fields |
+| `items` | Material or asset lines on a pass; stores current totals | `id`, `pass_id`, description, unit, `approved_qty`, `arrived_qty`, `returned_qty`, status, IT asset fields |
 | `duty_approvers` | Duty approver names and signature images | `id`, `name`, `signature_data`, active flag, creation timestamp |
 
-## Arrival transaction history
+## Unified transaction history
 
 | Table | Purpose |
 |---|---|
-| `arrival_transactions` | One row per arrival submission, including submitter, transaction timestamp, approval/rejection status and timestamps |
-| `arrival_transaction_items` | Quantity and details for each item in that arrival submission; includes previous quantity to support restoring totals after rejection |
+| `transactions` | One row per arrival or return submission. `type_of_transaction` is `arrival` or `return`; common fields store submitter, time, status, approver/rejection details, notes, and vehicle/driver details. |
+| `transaction_items` | One row per material item included in a transaction. `qty` is the transaction quantity; `remarks` stores the item note. It intentionally does not store separate arrived/returned/cumulative/pending quantity columns. |
 
-## Return transaction history
-
-| Table | Purpose |
-|---|---|
-| `return_transactions` | One row per return submission, including submitter, transaction timestamp, approval/rejection status and timestamps |
-| `return_transaction_items` | Per-item return quantity for this transaction, cumulative total after submission, pending balance, and previous total for rejection rollback |
-
-For example, if an item is returned in three transactions of 25, 10, and 15, the transaction rows record 25, 10, and 15 separately. `items.returned_qty` keeps the current cumulative total (50).
+`transactions.id` is referenced by `transaction_items.transaction_id`. Each `transaction_items` row also references `items.id`. For arrival transactions, `qty` represents the submitted arrived quantity. For return transactions, `qty` represents the quantity returned in that transaction (the difference from the prior cumulative returned quantity). Current totals remain on `items.approved_qty`, `items.arrived_qty`, and `items.returned_qty`.
 
 ## Audit and supporting data
 
@@ -42,7 +35,7 @@ For example, if an item is returned in three transactions of 25, 10, and 15, the
 
 - The server creates these tables if they do not exist and retains the existing `users`, `passes`, `items`, and `duty_approvers` data.
 - Existing databases only contain the historical detail that was previously saved. Earlier versions overwrote cumulative arrival/return quantities, so the exact sequence and timestamps of older partial transactions cannot be reconstructed from those totals alone. New submissions are recorded as separate transactions going forward.
-- The current item totals are a convenience snapshot. The transaction tables are the source for per-submission history.
+- The current item totals are a convenience snapshot. `transactions` and `transaction_items` preserve per-submission history. On startup, the application migrates records from the legacy split transaction tables into the unified tables and then removes the legacy tables.
 - Use the SQLite database file in the persistent `data` volume. Do not replace it with an empty database during deployment.
 - Back up `material.db` before migration. Test the update on a copy before using it with official records.
 
