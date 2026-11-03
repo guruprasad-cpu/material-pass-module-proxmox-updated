@@ -25,7 +25,7 @@ RUN apt-get update \
 
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
-COPY --chown=node:node --from=build /app/public ./public
+COPY --from=build --chown=node:node /app/public ./public
 COPY --chown=node:node server.js package.json ./
 COPY docker-entrypoint.sh ./docker-entrypoint.sh
 RUN chmod 755 ./docker-entrypoint.sh
