@@ -184,16 +184,42 @@ const hydrate = id => {
  pass.items = db.prepare('SELECT * FROM items WHERE pass_id=? ORDER BY sl_no').all(id);
   pass.pending_count = pass.items.reduce((sum,i)=>sum + Math.max(0, Number(i.arrived_qty||0)-Number(i.returned_qty||0)), 0);
  const allTransactions = db.prepare('SELECT * FROM transactions WHERE pass_id=? ORDER BY transaction_at,id').all(id);
+ const projectedReturned = new Map();
+ for (const item of pass.items) projectedReturned.set(Number(item.id), 0);
  for (const tx of allTransactions) {
-  tx.items = db.prepare('SELECT ti.*,i.description,i.uom,i.sl_no FROM transaction_items ti JOIN items i ON i.id=ti.item_id WHERE ti.transaction_id=? ORDER BY i.sl_no').all(tx.id);
+  tx.items = db.prepare('SELECT ti.*,i.description,i.uom,i.sl_no,i.arrived_qty,i.approved_qty FROM transaction_items ti JOIN items i ON i.id=ti.item_id WHERE ti.transaction_id=? ORDER BY i.sl_no').all(tx.id);
   for (const item of tx.items) {
-   if (tx.type_of_transaction === 'arrival') item.quantity_arrived = item.qty;
-   else { item.quantity_returned = item.qty; item.pending_quantity_after = Math.max(0, Number(db.prepare('SELECT arrived_qty-returned_qty AS n FROM items WHERE id=?').get(item.item_id)?.n || 0)); }
+   if (tx.type_of_transaction === 'arrival') item.quantity_arrived = Number(item.qty||0);
+   else {
+    item.quantity_returned = Number(item.qty||0);
+    const before = Number(projectedReturned.get(Number(item.item_id))||0);
+    const countsTowardBalance = ['Approved','Pending Approval'].includes(tx.status);
+    const after = before + (countsTowardBalance ? Number(item.qty||0) : 0);
+    item.pending_quantity_after = Math.max(0, Number(item.arrived_qty||0) - after);
+    item.projected_returned_total = after;
+    if (countsTowardBalance) projectedReturned.set(Number(item.item_id), after);
+   }
   }
  }
  pass.transactions = allTransactions;
  pass.arrival_transactions = allTransactions.filter(t=>t.type_of_transaction==='arrival');
  pass.return_transactions = allTransactions.filter(t=>t.type_of_transaction==='return');
+ // Display quantities from the latest active movement transaction, even before approval.
+ const latestArrival = [...pass.arrival_transactions].reverse().find(t=>['Pending Approval','Approved'].includes(t.status));
+ const latestArrivalQty = new Map((latestArrival?.items||[]).map(ti=>[Number(ti.item_id),Number(ti.quantity_arrived??ti.qty??0)]));
+ const pendingReturns = new Map();
+ for (const tx of pass.return_transactions.filter(t=>t.status==='Pending Approval')) {
+  for (const ti of tx.items||[]) pendingReturns.set(Number(ti.item_id),(pendingReturns.get(Number(ti.item_id))||0)+Number(ti.quantity_returned??ti.qty??0));
+ }
+ for (const item of pass.items) {
+  const arrived = latestArrivalQty.has(Number(item.id)) ? latestArrivalQty.get(Number(item.id)) : Number(item.arrived_qty||0);
+  const returned = Number(item.returned_qty||0) + (pendingReturns.get(Number(item.id))||0);
+  const pending = Math.max(0,arrived-returned);
+  item.display_arrived_qty = arrived;
+  item.display_returned_qty = returned;
+  item.display_pending_qty = pending;
+  item.display_item_status = returned>0 && pending>0 ? 'Partially Returned' : pending===0 && returned>0 ? 'Returned' : arrived>0 && arrived<Number(item.approved_qty||0) ? 'Partially Arrived' : item.item_status;
+ }
  return pass;
 }
 const canAccessPass = (req, pass) => !!pass && (['admin','approver'].includes(req.session.user?.role) || (req.session.user?.role==='user' && !!req.session.user?.company_name && String(pass.company_name||'').trim().toLowerCase() === String(req.session.user.company_name).trim().toLowerCase() && String(pass.contract_name||'').trim().toLowerCase() === String(req.session.user.contract_name||'').trim().toLowerCase()))
@@ -373,25 +399,211 @@ app.get('/api/passes/:id/pdf',auth,async(req,res)=>{
  const showArrivedColumn = pdfStage !== 'creation' && p.arrival_transactions.length > 0;
  const showReturnedColumns = pdfStage === 'return' && p.return_transactions.length > 0;
  const showSignatures = pdfStage === 'creation';
- const qrData={application:'Material Pass Module',pass_id:p.id,pass_no:p.pass_no,contract_name:p.contract_name,company_name:p.company_name,direction:p.direction==='Entry'?'IN':p.direction==='Exit'?'OUT':p.direction,type:p.type,return_date:p.return_date,mode:p.mode,escort_name:p.escort_name,driver_name:p.driver_name,driver_id:p.driver_id,vehicle_no:p.vehicle_no,vehicle_pass_no:p.vehicle_pass_no,issued_by:p.issued_by,destination:p.destination,status:p.status,created_at:p.created_at,items:p.items.map(i=>({sl_no:i.sl_no,category:i.category,description:i.description,uom:i.uom,approved_qty:i.approved_qty,arrived_qty:i.arrived_qty,returned_qty:i.returned_qty,pending_quantity:Math.max(0,Number(i.arrived_qty||0)-Number(i.returned_qty||0)),remarks:i.remarks,asset:{type:i.asset_type,brand:i.asset_brand,model:i.asset_model,serial_no:i.asset_serial,asset_tag:i.asset_tag,condition:i.asset_condition,assigned_to:i.asset_owner,purpose:i.asset_purpose}})),arrival_transactions:p.arrival_transactions.map(t=>({date:t.transaction_at,status:t.status,submitted_by:t.submitted_by,approved_by:t.approved_by,approved_at:t.approved_at,items:t.items.map(i=>({description:i.description,quantity_arrived:i.quantity_arrived,remarks:i.remarks}))})),return_transactions:p.return_transactions.map(t=>({date:t.transaction_at,status:t.status,submitted_by:t.submitted_by,approved_by:t.approved_by,approved_at:t.approved_at,items:t.items.map(i=>({description:i.description,quantity_returned:i.quantity_returned,pending_quantity_after:i.pending_quantity_after,remarks:i.remarks}))}))};
+ const qrData={application:'Material Pass Module',pass_id:p.id,pass_no:p.pass_no,contract_name:p.contract_name,company_name:p.company_name,direction:p.direction==='Entry'?'IN':p.direction==='Exit'?'OUT':p.direction,type:p.type,return_date:p.return_date,mode:p.mode,escort_name:p.escort_name,driver_name:p.driver_name,driver_id:p.driver_id,vehicle_no:p.vehicle_no,vehicle_pass_no:p.vehicle_pass_no,issued_by:p.issued_by,destination:p.destination,status:p.status,created_at:p.created_at,items:p.items.map(i=>({sl_no:i.sl_no,category:i.category,description:i.description,uom:i.uom,approved_qty:i.approved_qty,arrived_qty:i.display_arrived_qty??i.arrived_qty,returned_qty:i.display_returned_qty??i.returned_qty,pending_quantity:i.display_pending_qty??Math.max(0,Number(i.arrived_qty||0)-Number(i.returned_qty||0)),remarks:i.remarks,asset:{type:i.asset_type,brand:i.asset_brand,model:i.asset_model,serial_no:i.asset_serial,asset_tag:i.asset_tag,condition:i.asset_condition,assigned_to:i.asset_owner,purpose:i.asset_purpose}})),arrival_transactions:p.arrival_transactions.map(t=>({date:t.transaction_at,status:t.status,submitted_by:t.submitted_by,approved_by:t.approved_by,approved_at:t.approved_at,items:t.items.map(i=>({description:i.description,quantity_arrived:i.quantity_arrived,remarks:i.remarks}))})),return_transactions:p.return_transactions.map(t=>({date:t.transaction_at,status:t.status,submitted_by:t.submitted_by,approved_by:t.approved_by,approved_at:t.approved_at,items:t.items.map(i=>({description:i.description,quantity_returned:i.quantity_returned,pending_quantity_after:i.pending_quantity_after,remarks:i.remarks}))}))};
  let qr;try{qr=await QRCode.toDataURL(JSON.stringify(qrData),{errorCorrectionLevel:'L',margin:1,width:360})}catch{qr=await QRCode.toDataURL(JSON.stringify({pass_no:p.pass_no,pass_id:p.id,scan_url:`${(process.env.APP_BASE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '')}/api/scan/${p.id}`}),{errorCorrectionLevel:'L',margin:1,width:360})}
  const doc=new PDFDocument({size:'A4',margin:38,bufferPages:true});res.setHeader('Content-Type','application/pdf');res.setHeader('Content-Disposition',`inline; filename="${p.pass_no}.pdf"`);doc.pipe(res);
  const navy='#12314D',blue='#1769AA',gray='#526476',light='#EEF3F8',pageW=doc.page.width,contentW=pageW-76;let y=38;
  const ensure=(h)=>{if(y+h>doc.page.height-42){doc.addPage();y=38}};
  const txt=(text,x,w,size=9,font='Helvetica',color=navy)=>{doc.fillColor(color).font(font).fontSize(size).text(String(text??'—'),x,y,{width:w});};
- const logoPath=path.join(__dirname,'public','indian-navy-project-seabird.png');if(fs.existsSync(logoPath)){try{doc.image(logoPath,38,30,{fit:[58,58]})}catch{}}doc.fillColor(navy).font('Helvetica-Bold').fontSize(19).text('MATERIAL PASS',{align:'center'});doc.moveDown(.2);doc.fillColor(gray).font('Helvetica').fontSize(9).text('Material movement authorisation and tracking record',{align:'center'});doc.moveDown(.8);doc.fillColor(blue).font('Helvetica-Bold').fontSize(12).text(`PASS NO: ${p.pass_no}`);y=doc.y+10;
+ const logoPath=path.join(__dirname,'public','indian-navy-project-seabird.png');if(fs.existsSync(logoPath)){try{doc.image(logoPath,38,18,{fit:[58,58]})}catch{}}doc.fillColor(navy).font('Helvetica-Bold').fontSize(19).text('MATERIAL PASS',{align:'center'});doc.moveDown(.2);doc.fillColor(gray).font('Helvetica').fontSize(9).text('Material movement authorisation and tracking record',{align:'center'});doc.moveDown(1.15);doc.fillColor(blue).font('Helvetica-Bold').fontSize(12).text(`PASS NO: ${p.pass_no}`);y=doc.y+14;
  const latestMovement = pdfStage==='return' ? p.return_transactions[p.return_transactions.length-1] : p.arrival_transactions[p.arrival_transactions.length-1];const movementFields = pdfStage==='creation' ? [] : String(p.mode||'').toLowerCase().includes('hand') ? [['Escort Name',latestMovement?.escort_name||'']] : [['Escort Name',latestMovement?.escort_name||''],['Driver Name',latestMovement?.driver_name||''],['Driver ID',latestMovement?.driver_id||''],['Vehicle No.',latestMovement?.vehicle_no||''],['Vehicle Pass No.',latestMovement?.vehicle_pass_no||'']];const details=[['Contract Name',p.contract_name],['Company Name',p.company_name],['Direction',p.direction==='Entry'?'IN':p.direction==='Exit'?'OUT':p.direction],['Pass Type',p.type],['Date of Return',p.return_date||''],['Status',p.status],['Transport Mode',p.mode],...movementFields,['Issued By',p.issued_by],['Destination',p.destination||'']];const colW=(contentW-20)/2;
  for(let i=0;i<details.length;i+=2){ensure(30);for(let c=0;c<2;c++){const d=details[i+c];if(!d)continue;const x=38+c*(colW+20);doc.fillColor(gray).font('Helvetica-Bold').fontSize(8).text(d[0],x,y,{width:colW});doc.fillColor(navy).font('Helvetica').fontSize(9).text(String(d[1]??'—'),x,y+11,{width:colW});}y+=30}
  y+=6;ensure(45);doc.fillColor(navy).font('Helvetica-Bold').fontSize(11).text('MATERIAL DETAILS',38,y);y+=20;
  const cols=[{t:'#',w:22},{t:'Category / Description',w:150},{t:'Unit',w:42},{t:'Quantity',w:58},...(showArrivedColumn?[{t:'Arrived',w:58}]:[]),...(showReturnedColumns?[{t:'Returned',w:58},{t:'Pending Quantity',w:70}]:[]),{t:'Remarks / IT asset details',w:0}];
  const usedBeforeRemarks=cols.slice(0,-1).reduce((sum,c)=>sum+c.w,0);cols[cols.length-1].w=contentW-usedBeforeRemarks;
- const drawRow=(vals,header=false)=>{const plain=v=>Array.isArray(v)?v.map(part=>part.text||'').join(''):String(v??'');const heights=vals.map((v,i)=>doc.heightOfString(plain(v),{width:cols[i].w-8,fontSize:8})+10);const h=header?27:Math.max(30,...heights);ensure(h);let x=38;if(header)doc.rect(38,y,contentW,h).fill(light);else doc.rect(38,y,contentW,h).stroke('#D6DEE7');for(let i=0;i<vals.length;i++){doc.fillColor(navy).font(header?'Helvetica-Bold':'Helvetica').fontSize(7).text(Array.isArray(vals[i])?vals[i]:String(vals[i]??''),x+4,y+5,{width:cols[i].w-8,height:h-8});doc.save().moveTo(x,y).lineTo(x,y+h).stroke('#D6DEE7').restore();x+=cols[i].w}doc.moveTo(38,y+h).lineTo(38+contentW,y+h).stroke('#D6DEE7');y+=h};
- drawRow(cols.map(c=>c.t),true);for(const i of p.items){const isAsset=i.category==='IT Asset';const assetFields=[['Type',i.asset_type],['Brand',i.asset_brand],['Model',i.asset_model],['Serial Number',i.asset_serial],['Asset Tag',i.asset_tag],['Condition',i.asset_condition],['Assigned To',i.asset_owner],['Purpose / Remarks',i.asset_purpose]].filter(([,v])=>String(v||'').trim());const assetRich=[];assetFields.forEach(([label,value],n)=>{if(n)assetRich.push({text:'\n'});assetRich.push({text:label+': ',options:{font:'Helvetica-Bold'}});assetRich.push({text:String(value)});});const remarksRich=[];if(i.remarks)remarksRich.push({text:String(i.remarks)});if(isAsset&&assetRich.length){if(remarksRich.length)remarksRich.push({text:'\n'});remarksRich.push(...assetRich)}const categoryDescription=isAsset?`IT Asset\n${i.description}`:String(i.description||'');drawRow([i.sl_no,categoryDescription,i.uom,i.approved_qty,...(showArrivedColumn?[i.arrived_qty]:[]),...(showReturnedColumns?[i.returned_qty,Math.max(0,Number(i.arrived_qty||0)-Number(i.returned_qty||0))]:[]),remarksRich.length?remarksRich:'—'])}
- if(p.arrival_transactions.length){y+=14;ensure(35);doc.fillColor(navy).font('Helvetica-Bold').fontSize(11).text('ARRIVAL TRANSACTION HISTORY',38,y);y+=20;for(const tx of p.arrival_transactions){ensure(24);const approver=tx.status==='Approved'&&tx.approved_by?` · Approver: ${tx.approved_by}`:'';doc.fillColor(gray).font('Helvetica').fontSize(9).text(`${formatIndiaDateTime(tx.transaction_at)} · ${tx.status} · Submitted by ${tx.submitted_by}${approver}`,38,y,{width:contentW});y+=16}}
- if(p.return_transactions.length){y+=14;ensure(35);doc.fillColor(navy).font('Helvetica-Bold').fontSize(11).text('RETURN TRANSACTION HISTORY',38,y);y+=20;for(const tx of p.return_transactions){ensure(28);doc.fillColor(gray).font('Helvetica-Bold').fontSize(8).text(`${formatIndiaDateTime(tx.transaction_at)} · ${tx.status} · Submitted by ${tx.submitted_by}${tx.approved_by?' · Approved by '+tx.approved_by:''}`,38,y,{width:contentW});y+=13;for(const it of tx.items){ensure(18);doc.fillColor(navy).font('Helvetica').fontSize(8).text(`• ${it.description}: ${it.quantity_returned} returned · Pending ${it.pending_quantity_after}${it.remarks?' — '+it.remarks:''}`,48,y,{width:contentW-10});y+=12}}}
+ const assetLabelWidth = 82;
+ const assetFontSize = 7;
+ const assetLineGap = 4;
+ const assetTopPadding = 7;
+ const assetBottomPadding = 9;
+
+ const assetListLayout = (value, width) => {
+   const labelWidth = Math.min(assetLabelWidth, Math.max(40, width * 0.44));
+   const valueWidth = Math.max(20, width - labelWidth - 6);
+   const lines = (value.lines || []).map(line => {
+     const val = String(line.value ?? '');
+     const valueHeight = val
+       ? doc.heightOfString(val, {
+           width: valueWidth,
+           font: 'Helvetica',
+           fontSize: assetFontSize,
+           lineGap: 0
+         })
+       : 10;
+     return {
+       label: String(line.label || '') + ':',
+       value: val,
+       height: Math.max(10, valueHeight)
+     };
+   });
+   const contentHeight = lines.reduce(
+     (sum, line) => sum + line.height + assetLineGap,
+     0
+   );
+   return {
+     labelWidth,
+     valueWidth,
+     lines,
+     height: assetTopPadding + contentHeight - assetLineGap + assetBottomPadding
+   };
+ };
+
+ const assetListMetrics = (value, width) =>
+   assetListLayout(value, width).height;
+
+ const drawCellText = (value, x, top, width, height, header = false) => {
+   const baseFont = header ? 'Helvetica-Bold' : 'Helvetica';
+   doc.fillColor(navy).font(baseFont).fontSize(7);
+
+   if (value && value.kind === 'assetList') {
+     const layout = assetListLayout(value, width);
+     let lineY = top + assetTopPadding;
+     const valueX = x + layout.labelWidth + 6;
+
+     for (const line of layout.lines) {
+       doc.fillColor(navy)
+         .font('Helvetica-Bold')
+         .fontSize(assetFontSize)
+         .text(line.label, x, lineY, {
+           width: layout.labelWidth,
+           lineBreak: false
+         });
+
+       if (line.value) {
+         doc.fillColor(navy)
+           .font('Helvetica')
+           .fontSize(assetFontSize)
+           .text(line.value, valueX, lineY, {
+             width: layout.valueWidth,
+             lineGap: 0
+           });
+       }
+
+       lineY += line.height + assetLineGap;
+     }
+     return;
+   }
+
+   doc.text(String(value ?? '—'), x, top, {
+     width,
+     height
+   });
+ };
+
+const drawRow = (vals, header = false) => {
+  const heights = vals.map((v, i) =>
+    v && v.kind === 'assetList'
+      ? assetListMetrics(v, cols[i].w - 8)
+      : doc.heightOfString(
+          Array.isArray(v)
+            ? v.map(part => part?.text ?? '').join('')
+            : String(v ?? ''),
+          {
+            width: cols[i].w - 8,
+            fontSize: 8
+          }
+        ) + 10
+  );
+
+  const h = header ? 27 : Math.max(30, ...heights);
+
+  ensure(h);
+
+  let x = 38;
+
+  if (header) {
+    doc.rect(38, y, contentW, h).fill(light);
+  } else {
+    doc.rect(38, y, contentW, h).stroke('#D6DEE7');
+  }
+
+  for (let i = 0; i < vals.length; i++) {
+    drawCellText(vals[i], x + 4, y + 5, cols[i].w - 8, h - 8, header);
+
+    doc.save()
+      .moveTo(x, y)
+      .lineTo(x, y + h)
+      .stroke('#D6DEE7')
+      .restore();
+
+    x += cols[i].w;
+  }
+
+  doc.moveTo(38, y + h)
+    .lineTo(38 + contentW, y + h)
+    .stroke('#D6DEE7');
+
+  y += h;
+};
+
+ // Draw the Material Details column-heading row before listing items.
+ drawRow(cols.map(column => column.t), true);
+
+ const pendingReturnItems=new Map();
+ for(const tx of p.return_transactions.filter(t=>t.status==='Pending Approval')) for(const ti of (tx.items||[])) pendingReturnItems.set(Number(ti.item_id),(pendingReturnItems.get(Number(ti.item_id))||0)+Number(ti.quantity_returned??ti.qty??0));
+ const formatRemarkValue=(value)=>{
+  if(value===null||value===undefined||value==='')return '';
+  if(typeof value==='string'){const trimmed=value.trim();if((trimmed.startsWith('{')&&trimmed.endsWith('}'))||(trimmed.startsWith('[')&&trimmed.endsWith(']'))){try{return formatRemarkValue(JSON.parse(trimmed))}catch{ /* keep ordinary text */ }}return trimmed.replace(/\[object Object\]/g,'').replace(/(?:\s*[·,;]\s*){2,}/g,' · ').replace(/^\s*[·,;]\s*|\s*[·,;]\s*$/g,'').trim()}
+  if(Array.isArray(value))return value.map(v=>formatRemarkValue(v)).filter(Boolean).join(' · ');
+  if(typeof value==='object')return Object.entries(value).filter(([,v])=>v!==null&&v!==undefined&&v!=='').map(([k,v])=>`${k.replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase())}: ${formatRemarkValue(v)}`).join(' · ');
+  return String(value);
+ };
+ for (const i of p.items) {
+  const isAsset = i.category === 'IT Asset';
+
+  const assetFields = [
+    ['Type', i.asset_type],
+    ['Brand', i.asset_brand],
+    ['Model', i.asset_model],
+    ['Serial Number', i.asset_serial],
+    ['Asset Tag', i.asset_tag],
+    ['Condition', i.asset_condition],
+    ['Assigned To', i.asset_owner],
+    ['Purpose / Remarks', i.asset_purpose]
+  ].filter(([, value]) => String(value || '').trim());
+
+  const formattedRemark = formatRemarkValue(i.remarks);
+
+  const remarksCell = isAsset
+    ? {
+        kind: 'assetList',
+        lines: [
+          ...(formattedRemark
+            ? [{ label: 'Remark', value: formattedRemark }]
+            : []),
+          ...assetFields.map(([label, value]) => ({
+            label,
+            value: formatRemarkValue(value)
+          }))
+        ]
+      }
+    : (formattedRemark || '—');
+
+  const categoryDescription = isAsset
+    ? `IT Asset\n${i.description}`
+    : String(i.description || '');
+
+  drawRow([
+    i.sl_no,
+    categoryDescription,
+    i.uom,
+    i.approved_qty,
+    ...(showArrivedColumn ? [
+      Number(i.display_arrived_qty ?? i.arrived_qty)
+    ] : []),
+    ...(showReturnedColumns ? [
+      Number(i.display_returned_qty ?? i.returned_qty),
+      Number(i.display_pending_qty ?? Math.max(
+        0,
+        Number(i.arrived_qty || 0) - Number(i.returned_qty || 0)
+      ))
+    ] : []),
+    remarksCell
+  ]);
+}
  // IT asset departure declaration appears only after the relevant movement transaction is approved.
  const hasITAsset=p.items.some(i=>i.category==='IT Asset');const directionOut=['OUT','Exit'].includes(String(p.direction||'').toUpperCase());const declarationApproved=directionOut?p.arrival_transactions.some(t=>t.status==='Approved'):p.return_transactions.some(t=>t.status==='Approved');
- if(hasITAsset&&declarationApproved){const declaration='It is understood that the visitor is employed by the contractor for undertaking Project Seabird related activities and therefore is in possession of project related data on Floppies/ CD/ Computer/ Laptop/ Hard Disks/ USB drive. Further, the contractor has also taken full responsibilities of data security. Therefore, the request of the visitor to depart with the IT asset is hereby approved.';const boxX=38,boxW=contentW,textH=doc.heightOfString(declaration,{width:boxW-24,font:'Helvetica',fontSize:8.5,lineGap:2});const boxH=textH+74;ensure(boxH+18);y+=12;doc.rect(boxX,y,boxW,boxH).lineWidth(1).stroke('#526476');doc.fillColor(navy).font('Helvetica-Bold').fontSize(9).text('IT ASSET DEPARTURE DECLARATION',boxX+12,y+10,{width:boxW-24});doc.fillColor(navy).font('Helvetica').fontSize(8.5).text(declaration,boxX+12,y+27,{width:boxW-24,lineGap:2});const sigY=y+boxH-34;doc.moveTo(boxX+12,sigY).lineTo(boxX+190,sigY).stroke('#526476');doc.fillColor(navy).font('Helvetica-Bold').fontSize(8).text('PIMT',boxX+12,sigY+5,{width:178,align:'center'});y+=boxH+8;}
+ if(hasITAsset&&declarationApproved){const declaration='It is understood that the visitor is employed by the contractor for undertaking Project Seabird related activities and therefore is in possession of project related data on Floppies/ CD/ Computer/ Laptop/ Hard Disks/ USB drive. Further, the contractor has also taken full responsibilities of data security. Therefore, the request of the visitor to depart with the IT asset is hereby approved.';const boxX=38,boxW=contentW,textH=doc.heightOfString(declaration,{width:boxW-24,font:'Helvetica',fontSize:8.5,lineGap:2});const boxH=textH+42;ensure(boxH+58);y+=12;doc.rect(boxX,y,boxW,boxH).lineWidth(1).stroke('#526476');doc.fillColor(navy).font('Helvetica-Bold').fontSize(9).text('IT ASSET DEPARTURE DECLARATION',boxX+12,y+10,{width:boxW-24});doc.fillColor(navy).font('Helvetica').fontSize(8.5).text(declaration,boxX+12,y+27,{width:boxW-24,lineGap:2});y+=boxH+22;doc.moveTo(boxX+12,y+16).lineTo(boxX+190,y+16).stroke('#526476');doc.fillColor(navy).font('Helvetica-Bold').fontSize(8).text('PIMT',boxX+12,y+20,{width:178,align:'center'});y+=48;}
  // Signature boxes appear only on the PDF explicitly generated immediately after creating a new pass.
  if(showSignatures){ensure(112);y+=10;doc.fillColor(navy).font('Helvetica-Bold').fontSize(12).text('Authorised Signatories',38,y,{align:'left'});y+=22;const gap=12,boxW=(contentW-2*gap)/3,boxH=64;for(let n=0;n<3;n++){const x=38+n*(boxW+gap);doc.rect(x,y,boxW,boxH).lineWidth(1).stroke('#526476');doc.fillColor(navy).font('Helvetica-Bold').fontSize(10).text(['Contractor','Engineer','PIMT'][n],x,y+boxH+5,{width:boxW,align:'center'})}y+=boxH+24;}
  const qrImg=Buffer.from(qr.split(',')[1],'base64');ensure(150);y+=8;doc.image(qrImg,(pageW-100)/2,y,{width:100,height:100});y+=104;doc.fillColor(navy).font('Helvetica-Bold').fontSize(9).text('SCAN FOR COMPLETE PASS DATA',(pageW-220)/2,y,{width:220,align:'center'});doc.fillColor(gray).font('Helvetica').fontSize(8).text('QR includes pass, item, arrival and return transaction details.',38,y+15,{width:contentW,align:'center'});doc.end();
