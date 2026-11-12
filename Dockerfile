@@ -7,7 +7,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY package.json ./
-RUN npm install --omit=optional --no-audit --no-fund
+RUN npm install --no-audit --no-fund
 COPY . .
 RUN npm run build
 
